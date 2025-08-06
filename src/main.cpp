@@ -45,6 +45,7 @@ void playVideo(const char *path) {
         // In a real implementation, decode and render frames here.
         lv_timer_handler();
         lv_tick_inc(1);
+
         delay(1); // yield to avoid watchdog resets
     }
 
@@ -59,11 +60,13 @@ void setup() {
 
     tft.begin();
     tft.setRotation(1); // landscape 320x240
+
     tft.setSwapBytes(true);
 #ifdef TFT_BL
     pinMode(TFT_BL, OUTPUT);
     digitalWrite(TFT_BL, HIGH);
 #endif
+
 
     lv_disp_draw_buf_init(&draw_buf, buf, NULL, 320 * 10);
     lv_disp_drv_t disp_drv;

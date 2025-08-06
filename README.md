@@ -1,5 +1,6 @@
 # Pepe-Mood
 
+
 This project demonstrates a minimal LVGL application on the ESP32-2432S028 board using PlatformIO. It registers an LVGL display driver backed by [TFT_eSPI](https://github.com/Bodmer/TFT_eSPI) for the board's ILI9341 panel, initialises the SD card, and stubs out playback of an MP4 file stored at `/videos/pepe-lore.mp4` on the card.
 
 ## Building
@@ -42,3 +43,4 @@ digitalWrite(TFT_BL, HIGH);
 ```
 
 For a complete video-playing implementation on this hardware, see [witnessmenow/ESP32-Cheap-Yellow-Display](https://github.com/witnessmenow/ESP32-Cheap-Yellow-Display).
+
