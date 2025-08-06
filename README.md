@@ -1,6 +1,6 @@
 # Pepe-Mood
 
-This project demonstrates playing an MP4 video on the ESP32-2432S028 board using a C++ application built with PlatformIO and LVGL.
+This project demonstrates a minimal LVGL application on the ESP32-2432S028 board using PlatformIO.
 
 ## Building
 
@@ -14,7 +14,6 @@ This project demonstrates playing an MP4 video on the ESP32-2432S028 board using
    pio run --target upload
    ```
 
-## Running the video
+## Running
 
-1. Convert your video to a resolution supported by the display (e.g. 320x240) and copy the file as `/sd/video.mp4` on an SD card inserted into the board.
-2. After flashing, reset the board. The application will initialise LVGL and play the video in a loop.
+After flashing, reset the board. The application will initialise LVGL and display a "Hello, LVGL!" label in the centre of the screen.
