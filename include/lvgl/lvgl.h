@@ -1,0 +1,4 @@
+#ifndef LVGL_INCLUDE_WRAPPER
+#define LVGL_INCLUDE_WRAPPER
+#include <lvgl.h>
+#endif // LVGL_INCLUDE_WRAPPER
