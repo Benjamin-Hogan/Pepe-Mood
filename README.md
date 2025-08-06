@@ -1,6 +1,7 @@
 # Pepe-Mood
 
-This project demonstrates a minimal LVGL application on the ESP32-2432S028 board using PlatformIO.
+This project demonstrates a minimal LVGL application on the ESP32-2432S028 board using PlatformIO. It initialises the SD card
+and stubs out playback of an MP4 file stored at `/videos/demo.mp4` on the card.
 
 ## Building
 
@@ -16,4 +17,6 @@ This project demonstrates a minimal LVGL application on the ESP32-2432S028 board
 
 ## Running
 
-After flashing, reset the board. The application will initialise LVGL and display a "Hello, LVGL!" label in the centre of the screen.
+Copy an MP4 file to the `videos` directory on an SD card and insert it into the board. After flashing and resetting, the
+firmware attempts to read and "play" `/videos/demo.mp4`, reporting progress over the serial port. Actual video decoding is
+left to a future implementation.
