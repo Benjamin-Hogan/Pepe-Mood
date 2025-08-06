@@ -1,98 +1,189 @@
 #include <Arduino.h>
-#include <lvgl.h>
 #include <TFT_eSPI.h>
+#include <SPI.h>
 #include <SD.h>
 #include <FS.h>
 
-// LVGL displays its widgets on the board's ILI9341 screen via the TFT_eSPI
-// driver. SD card playback is stubbed out and only reads the file contents.
-
-// Plays an MP4 file stored on the SD card. This is a stub implementation that
-// simply reads the file; actual video decoding and rendering would need a
-// dedicated library.
-
-static const char *VIDEO_PATH = "/videos/pepe-lore.mp4";
-static lv_obj_t *status_label;
-
 TFT_eSPI tft = TFT_eSPI();
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf[320 * 10];
+static const char *VIDEO_PATH = "/videos/pepe-lore.mp4";
 
-static void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-    uint32_t w = area->x2 - area->x1 + 1;
-    uint32_t h = area->y2 - area->y1 + 1;
-
-    tft.startWrite();
-    tft.setAddrWindow(area->x1, area->y1, w, h);
-    tft.pushColors((uint16_t *)&color_p->full, w * h, true);
-    tft.endWrite();
-
-    lv_disp_flush_ready(disp);
+void drawProgressBar(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t percent) {
+    uint32_t fillWidth = (w * percent) / 100;
+    tft.drawRect(x, y, w, h, TFT_WHITE);
+    tft.fillRect(x + 1, y + 1, fillWidth - 2, h - 2, TFT_BLUE);
 }
 
 void playVideo(const char *path) {
+    Serial.printf("Attempting to open video file: %s\n", path);
+    
+    if (!SD.exists(path)) {
+        Serial.println("Video file does not exist!");
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("Video file not found!", 10, 120, 2);
+        return;
+    }
+    
     File video = SD.open(path);
     if (!video) {
         Serial.printf("Failed to open %s\n", path);
-        lv_label_set_text(status_label, "Video not found");
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("Error opening video!", 10, 120, 2);
+        return;
+    }
+    
+    if (video.size() == 0) {
+        Serial.println("Video file is empty!");
+        video.close();
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("Video file is empty!", 10, 120, 2);
         return;
     }
 
-    Serial.printf("Playing %s (%u bytes)\n", path, (unsigned)video.size());
+    uint32_t videoSize = video.size();
+    uint32_t bytesRead = 0;
+    uint8_t buffer[1024];
+    uint32_t lastProgress = 0;
+    
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Playing video...", 10, 100, 2);
 
-    uint8_t buffer[512];
-    while (video.read(buffer, sizeof(buffer)) > 0) {
-        // In a real implementation, decode and render frames here.
-        lv_timer_handler();
-        lv_tick_inc(1);
-
+    while (video.available()) {
+        size_t bytesThisRound = video.read(buffer, sizeof(buffer));
+        if (bytesThisRound == 0) break;
+        
+        bytesRead += bytesThisRound;
+        uint8_t progress = (bytesRead * 100) / videoSize;
+        
+        if (progress != lastProgress) {
+            drawProgressBar(10, 150, 300, 20, progress);
+            lastProgress = progress;
+        }
+        
+        // In a real implementation, decode and render frames here
         delay(1); // yield to avoid watchdog resets
     }
 
     video.close();
-    Serial.println("Playback finished (stub)");
-    lv_label_set_text(status_label, "Playback finished");
+    tft.fillScreen(TFT_BLACK);
+    tft.drawString("Playback finished", 10, 120, 2);
+    Serial.println("Playback finished");
 }
 
 void setup() {
     Serial.begin(115200);
-    lv_init();
+    Serial.println("Starting...");
 
-    tft.begin();
-    tft.setRotation(1); // landscape 320x240
+    // Initialize backlight first
+    pinMode(21, OUTPUT);
+    digitalWrite(21, HIGH);
+    delay(100);  // Give backlight time to stabilize
 
-    tft.setSwapBytes(true);
-#ifdef TFT_BL
-    pinMode(TFT_BL, OUTPUT);
-    digitalWrite(TFT_BL, HIGH);
-#endif
+    // Initialize display
+    tft.init();
+    tft.setRotation(3);  // Landscape, pins at top
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(1);
+    delay(500);
 
+    Serial.println("Display initialized");
+    tft.drawString("Initializing SD card...", 10, 10, 2);
 
-    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 320 * 10);
-    lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.draw_buf = &draw_buf;
-    disp_drv.flush_cb = my_disp_flush;
-    disp_drv.hor_res = 320;
-    disp_drv.ver_res = 240;
-    lv_disp_drv_register(&disp_drv);
-
-    status_label = lv_label_create(lv_scr_act());
-    lv_obj_center(status_label);
-
-    if (!SD.begin(5)) { // SD card CS pin on ESP32-2432S028
-        Serial.println("SD card init failed");
-        lv_label_set_text(status_label, "SD init failed");
+    // Initialize SD card using VSPI (same as display)
+    const int SD_CS = 5;    // SD Card CS pin
+    const int SD_MOSI = 23; // SD Card MOSI (VSPI)
+    const int SD_MISO = 19; // SD Card MISO (VSPI)
+    const int SD_SCK = 18;  // SD Card SCK (VSPI)
+    
+    Serial.println("Initializing SD card on VSPI...");
+    Serial.printf("CS:%d MOSI:%d MISO:%d SCK:%d\n", SD_CS, SD_MOSI, SD_MISO, SD_SCK);
+    
+    // End any existing connections
+    SD.end();
+    delay(100);
+    
+    // Set up CS pin
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    delay(100);
+    
+    // Initialize using default VSPI
+    SPIClass sdSPI = SPI;
+    sdSPI.begin();
+    
+    Serial.println("Attempting SD card initialization...");
+    bool sdInitialized = false;
+    
+    // Try initialization a few times
+    for(int attempt = 0; attempt < 3; attempt++) {
+        Serial.printf("SD init attempt %d\n", attempt + 1);
+        
+        if (SD.begin(SD_CS, sdSPI)) {
+            sdInitialized = true;
+            Serial.println("SD.begin() successful");
+            
+            // Extra verification steps
+            uint8_t cardType = SD.cardType();
+            if (cardType == CARD_NONE) {
+                Serial.println("No SD card attached");
+                sdInitialized = false;
+            } else {
+                Serial.print("SD Card Type: ");
+                if (cardType == CARD_MMC) Serial.println("MMC");
+                else if (cardType == CARD_SD) Serial.println("SDSC");
+                else if (cardType == CARD_SDHC) Serial.println("SDHC");
+                
+                uint64_t cardSize = SD.cardSize() / (1024 * 1024);
+                Serial.printf("SD Card Size: %lluMB\n", cardSize);
+                
+                // Try to open and read root directory
+                File root = SD.open("/");
+                if (root) {
+                    Serial.println("Root directory opened successfully");
+                    if (root.isDirectory()) {
+                        File entry = root.openNextFile();
+                        bool filesFound = false;
+                        while(entry) {
+                            filesFound = true;
+                            Serial.printf("  Found: %s, size: %d\n", entry.name(), entry.size());
+                            entry.close();
+                            entry = root.openNextFile();
+                        }
+                        if (!filesFound) {
+                            Serial.println("No files found in root directory");
+                        }
+                    }
+                    root.close();
+                } else {
+                    Serial.println("Failed to open root directory");
+                    sdInitialized = false;
+                }
+            }
+        } else {
+            Serial.println("SD.begin() failed");
+        }
+        
+        if (sdInitialized) break;  // Success - exit attempt loop
+        
+        // Clean up before next attempt
+        SD.end();
+        delay(500);
+    }    if (!sdInitialized) {
+        Serial.println("SD card init failed after all attempts");
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawString("SD card init failed!", 10, 30, 2);
         return;
     }
 
-    lv_label_set_text(status_label, "Playing video...");
-    lv_timer_handler(); // draw status label before blocking file read
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawString("SD card initialized!", 10, 30, 2);
+    delay(1000);
+
+    // Start video playback
     playVideo(VIDEO_PATH);
 }
 
 void loop() {
-    lv_timer_handler();
-    lv_tick_inc(5);
-    delay(5);
+    delay(100); // Small delay to prevent watchdog resets
 }
