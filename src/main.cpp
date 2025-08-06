@@ -12,8 +12,15 @@
 // simply reads the file; actual video decoding and rendering would need a
 // dedicated library.
 
-static const char *VIDEO_PATH = "/videos/demo.mp4";
+static const char *VIDEO_PATH = "/videos/pepe-lore.mp4";
 static lv_obj_t *status_label;
+
+static void dummy_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+    lv_disp_flush_ready(disp);
+}
+
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf[240 * 10];
 
 void playVideo(const char *path) {
     File video = SD.open(path);
@@ -39,6 +46,15 @@ void setup() {
     Serial.begin(115200);
     lv_init();
 
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, LV_HOR_RES_MAX * 10);
+    lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.draw_buf = &draw_buf;
+    disp_drv.flush_cb = dummy_flush;
+    disp_drv.hor_res = 240;
+    disp_drv.ver_res = 320;
+    lv_disp_drv_register(&disp_drv);
+
     status_label = lv_label_create(lv_scr_act());
     lv_obj_center(status_label);
 
@@ -54,5 +70,6 @@ void setup() {
 
 void loop() {
     lv_timer_handler();
+    lv_tick_inc(5);
     delay(5);
 }
