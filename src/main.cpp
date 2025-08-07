@@ -1,292 +1,290 @@
-#include <Arduino.h>
-#include <TFT_eSPI.h>
-#include <SPI.h>
-#include <SD.h>
-#include <FS.h>
-#include "MjpegClass.h"
+// Tutorial : https://youtu.be/jYcxUgxz9ks
+// Use board "ESP32 Dev Module" (last tested on v3.2.0)
 
-// Pin definitions
-#define BL_PIN 21  // Backlight pin
-#define TFT_BL 21  // Backlight control
-#define BOOT_PIN 0 // Boot button for control
+#include <Arduino_GFX_Library.h> // Install "GFX Library for Arduino" with the Library Manager (last tested on v1.6.0)
+#include <JPEGDEC.h>             // Install "JPEGDEC" with the Library Manager (last tested on v1.8.2)
+#include "MjpegClass.h"          // Included in this project
+#include "SD.h"                  // Included with the Espressif Arduino Core (last tested on v3.2.0)
+#include "esp_heap_caps.h"
 
-// SPI configuration
-static const int spi_speed = 80000000;
-static const int SD_CS = 5;    // SD Card CS pin
-static const int SD_MOSI = 23; // SD Card MOSI (VSPI)
-static const int SD_MISO = 19; // SD Card MISO (VSPI)
-static const int SD_SCK = 18;  // SD Card SCK (VSPI)
+// Pins for the display
+#define BL_PIN 21 // On some cheap yellow display model, BL pin is 27
+#define SD_CS 5
+#define SD_MISO 19
+#define SD_MOSI 23
+#define SD_SCK 18
 
-// Video playback settings
-#define FPS 30
-#define MJPEG_BUFFER_SIZE (320 * 240 * 2 / 4)  // Adjusted buffer size
-#define VIDEO_PATH "/pepe.mjpeg"
+#define BOOT_PIN 0                   // Boot pin
+#define BOOT_BUTTON_DEBOUCE_TIME 400 // Debounce time when reading the boot button in milliseconds
 
-TFT_eSPI tft = TFT_eSPI();
-static MjpegClass mjpeg;
+#define DISPLAY_SPI_SPEED 80000000L // 80MHz
+#define SD_SPI_SPEED 80000000L      // 80Mhz
 
-// Global variables for performance tracking
-static unsigned long total_frames = 0;
-static unsigned long total_read_video = 0;
-static unsigned long total_decode_video = 0;
-static unsigned long total_show_video = 0;
-static unsigned long start_ms, curr_ms;
+const char *MJPEG_FOLDER = "/mjpeg"; // Name of the mjpeg folder on the SD Card
 
-// Buffers for video playback
-static uint8_t *mjpeg_buf = nullptr;
-static uint16_t *output_buf = nullptr;
+// Storage for files to read on the SD card
+#define MAX_FILES 20 // Maximum number of files, adjust as needed
+String mjpegFileList[MAX_FILES];
+uint32_t mjpegFileSizes[MAX_FILES] = {0}; // Store each GIF file's size in bytes
+int mjpegCount = 0;
+static int currentMjpegIndex = 0;
+static File mjpegFile; // temp gif file holder
 
-// Global variables for MJPEG playback
-static int jpegDrawTime = 0;
+// Global variables for mjpeg
+MjpegClass mjpeg;
+int total_frames;
+unsigned long total_read_video;
+unsigned long total_decode_video;
+unsigned long total_show_video;
+unsigned long start_ms, curr_ms;
+long output_buf_size, estimateBufferSize;
+uint8_t *mjpeg_buf;
+uint16_t *output_buf;
 
-// Callback function for drawing frames
-static int tft_output(JPEGDRAW *pDraw) {
-    // Calculate time taken to draw frame
-    unsigned long start = millis();
-    tft.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, (uint16_t *)pDraw->pPixels);
-    jpegDrawTime += millis() - start;
-    return 1; // Return 1 to indicate success
+// Forward declarations
+void loadMjpegFilesList();
+void playSelectedMjpeg(int mjpegIndex);
+void mjpegPlayFromSDCard(char *mjpegFilename);
+int jpegDrawCallback(JPEGDRAW *pDraw);
+String formatBytes(size_t bytes);
+
+// Display global variables
+Arduino_DataBus *bus = new Arduino_HWSPI(2 /* DC */, 15 /* CS */, 14 /* SCK */, 13 /* MOSI */, 12 /* MISO */);
+Arduino_GFX *gfx = new Arduino_ILI9341(bus);
+
+// SD Card reader is on a separate SPI
+SPIClass sd_spi(VSPI);
+
+// Interrupt to skip to the next mjpeg when the boot button is pressed
+volatile bool skipRequested = false; // set in ISR, read in loop()
+volatile uint32_t isrTick = 0;       // tick count captured in ISR
+uint32_t lastPress = 0;              // used in main context for debounc
+
+void IRAM_ATTR onButtonPress()
+{
+    skipRequested = true;                 // flag handled in the playback loop
+    isrTick = xTaskGetTickCountFromISR(); // safe, 1-tick resolution
 }
 
-// Progress bar function
-static void drawProgressBar(int x, int y, int width, int height, uint8_t progress) {
-    tft.drawRect(x, y, width, height, TFT_WHITE);
-    if (progress > 0) {
-        int fillWidth = (width - 2) * progress / 100;
-        tft.fillRect(x + 1, y + 1, fillWidth, height - 2, TFT_GREEN);
-    }
-}
-
-void playVideo(const char *path) {
-    Serial.printf("Playing video from: %s\n", path);
-
-    File vFile = SD.open(path);
-    if (!vFile || vFile.isDirectory()) {
-        Serial.println("ERROR: Failed to open video file");
-        return;
-    }
-
-    Serial.println("MJPEG video start");
-    tft.fillScreen(TFT_BLACK);
-
-    // Reset performance counters
-    unsigned long start_ms = millis();
-    unsigned long curr_ms;
-    unsigned long total_decode_video = 0;
-    unsigned long total_play_video = 0;
-    total_frames = 0;
-    jpegDrawTime = 0;
-
-    // Setup MJPEG decoder
-    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Set to false for BGR color format
-
-    // Play video
-    while (vFile.available()) {
-        // Read video
-        curr_ms = millis();
-        if (!mjpeg.readMjpegBuf()) {
-            Serial.println("Read video error");
-            break;
-        }
-        total_play_video += millis() - curr_ms;
-
-        // Play video        
-        curr_ms = millis();
-        if (!mjpeg.drawJpg()) {
-            Serial.println("Draw video error");
-            break;
-        }
-        total_decode_video += millis() - curr_ms;
-
-        total_frames++;
-
-        // Maintain frame rate
-        int frame_time = millis() - curr_ms;
-        if (frame_time < (1000 / FPS)) {
-            delay((1000 / FPS) - frame_time);
-        }
-    }
-
-    vFile.close();
-
-    // Show statistics
-    int total_time = millis() - start_ms;
-    float fps = 1000.0 * total_frames / total_time;
-    total_decode_video -= jpegDrawTime;
-
-    Serial.printf("Total frames: %d\n", total_frames);
-    Serial.printf("Time used: %d ms\n", total_time);
-    Serial.printf("Average FPS: %0.1f\n", fps);
-    Serial.printf("Read video: %lu ms (%0.1f%%)\n", total_play_video, 100.0 * total_play_video / total_time);
-    Serial.printf("Decode video: %lu ms (%0.1f%%)\n", total_decode_video, 100.0 * total_decode_video / total_time);
-    Serial.printf("Draw video: %d ms (%0.1f%%)\n", jpegDrawTime, 100.0 * jpegDrawTime / total_time);
-
-    // Show results on screen
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_GREEN);
-    tft.setCursor(0, 0);
-    tft.printf("Completed %d frames\n", total_frames);
-    tft.printf("Avg FPS: %0.1f\n", fps);
-    tft.setTextColor(TFT_WHITE);
-    tft.printf("Time: %0.1fs\n", total_time / 1000.0);
-}
-
-void setup() {
+void setup()
+{
     Serial.begin(115200);
 
-    // Set display backlight pin
+    // Set display backlight to High
     pinMode(BL_PIN, OUTPUT);
     digitalWrite(BL_PIN, HIGH);
 
-    // Initialize display
+    // Display initialization
     Serial.println("Display initialization");
-    tft.init();
-    tft.setRotation(0); // Portrait
-    tft.fillScreen(TFT_BLACK);
-    // Display inversion can be toggled with BOOT button if needed for your specific model
-    Serial.printf("Screen size Width=%d, Height=%d\n", tft.width(), tft.height());
-
-    // Initialize SD card using custom SPI configuration
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
-    if (!SD.begin(SD_CS, SPI)) {
-        Serial.println("ERROR: File system mount failed!");
-        tft.setTextColor(TFT_RED);
-        tft.drawString("SD Card Mount Failed", 10, 10, 2);
-        while (1) delay(100);
-    }
-
-    // Allocate video buffers
-    Serial.println("Allocating video buffers...");
-    mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
-    if (!mjpeg_buf) {
-        Serial.println("mjpeg_buf allocation failed!");
-        while (1) delay(100);
-    }
-
-    // Initialize display
-    tft.init();
-    tft.setRotation(0);  // Portrait
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setTextSize(1);
-    delay(500);
-
-    Serial.println("Display initialized");
-    tft.drawString("Initializing SD card...", 10, 10, 2);
-
-    // Initialize SD card using VSPI (same as display)
-    const int SD_CS = 5;    // SD Card CS pin
-    const int SD_MOSI = 23; // SD Card MOSI (VSPI)
-    const int SD_MISO = 19; // SD Card MISO (VSPI)
-    const int SD_SCK = 18;  // SD Card SCK (VSPI)
-
-    Serial.println("Initializing SD card on VSPI...");
-    Serial.printf("CS:%d MOSI:%d MISO:%d SCK:%d\n", SD_CS, SD_MOSI, SD_MISO, SD_SCK);
-
-    // End any existing connections
-    SD.end();
-    delay(100);
-
-    // Set up CS pin
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    delay(100);
-
-    // Initialize using default VSPI
-    SPIClass sdSPI = SPI;
-    sdSPI.begin();
-
-    Serial.println("Attempting SD card initialization...");
-    bool sdInitialized = false;
-
-    // Try initialization a few times
-    for (int attempt = 0; attempt < 3; attempt++) {
-        Serial.printf("SD init attempt %d\n", attempt + 1);
-
-        if (SD.begin(SD_CS, sdSPI)) {
-            sdInitialized = true;
-            Serial.println("SD.begin() successful");
-
-            // Extra verification steps
-            uint8_t cardType = SD.cardType();
-            if (cardType == CARD_NONE) {
-                Serial.println("No SD card attached");
-                sdInitialized = false;
-            } else {
-                Serial.print("SD Card Type: ");
-                if (cardType == CARD_MMC) Serial.println("MMC");
-                else if (cardType == CARD_SD) Serial.println("SDSC");
-                else if (cardType == CARD_SDHC) Serial.println("SDHC");
-
-                uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-                Serial.printf("SD Card Size: %lluMB\n", cardSize);
-
-                // Try to open and read root directory
-                File root = SD.open("/");
-                if (root) {
-                    Serial.println("Root directory opened successfully");
-                    if (root.isDirectory()) {
-                        File entry = root.openNextFile();
-                        bool filesFound = false;
-                        while (entry) {
-                            filesFound = true;
-                            Serial.printf("  Found: %s, size: %d\n", entry.name(), entry.size());
-                            entry.close();
-                            entry = root.openNextFile();
-                        }
-                        if (!filesFound) {
-                            Serial.println("No files found in root directory");
-                        }
-                    }
-                    root.close();
-                } else {
-                    Serial.println("Failed to open root directory");
-                    sdInitialized = false;
-                }
-            }
-        } else {
-            Serial.println("SD.begin() failed");
+    if (!gfx->begin(DISPLAY_SPI_SPEED))
+    {
+        Serial.println("Display initialization failed!");
+        while (true)
+        {
+            /* no need to continue */
         }
+    }
+    gfx->setRotation(0);
+    gfx->fillScreen(RGB565_BLACK);
+    // gfx->invertDisplay(true); // on some cheap yellow models, display must be inverted
+    Serial.printf("Screeen size Width=%d,Height=%d\n", gfx->width(), gfx->height());
 
-        if (sdInitialized) break;  // Success - exit attempt loop
-
-        // Clean up before next attempt
-        SD.end();
-        delay(500);
+    // SD card initialization
+    Serial.println("SD Card initialization");
+    if (!SD.begin(SD_CS, sd_spi, SD_SPI_SPEED, "/sd"))
+    {
+        Serial.println("ERROR: File system mount failed!");
+        while (true)
+        {
+            /* no need to continue */
+        }
     }
 
-    if (!sdInitialized) {
-        Serial.println("SD card init failed after all attempts");
-        tft.setTextColor(TFT_RED, TFT_BLACK);
-        tft.drawString("SD card init failed!", 10, 30, 2);
-        return;
+    // Buffer allocation for mjpeg playing
+    Serial.println("Buffer allocation");
+    output_buf_size = gfx->width() * 4 * 2;
+    output_buf = (uint16_t *)heap_caps_aligned_alloc(16, output_buf_size * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!output_buf)
+    {
+        Serial.println("output_buf aligned_alloc failed!");
+        while (true)
+        {
+            /* no need to continue */
+        }
+    }
+    estimateBufferSize = gfx->width() * gfx->height() * 2 / 5;
+    mjpeg_buf = (uint8_t *)heap_caps_malloc(estimateBufferSize, MALLOC_CAP_8BIT);
+    if (!mjpeg_buf)
+    {
+        Serial.println("mjpeg_buf allocation failed!");
+        while (true)
+        {
+            /* no need to continue */
+        }
     }
 
-    tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.drawString("SD card initialized!", 10, 30, 2);
-    delay(1000);
+    loadMjpegFilesList(); // Load the list of mjpeg to play from the SD card
 
-    // Start video playback
-    playVideo(VIDEO_PATH);
+    // Set the boot button to skip the current mjpeg playing and go to the next
+    pinMode(BOOT_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(BOOT_PIN), // fast ISR
+                    onButtonPress, FALLING);         // press == LOW
 }
 
-// Global variable to track inversion state
-static bool isInverted = false;
-static unsigned long lastButtonPress = 0;
-const unsigned long DEBOUNCE_DELAY = 300;  // Debounce time in milliseconds
+void loop()
+{
+    playSelectedMjpeg(currentMjpegIndex);
+    currentMjpegIndex++;
+    if (currentMjpegIndex >= mjpegCount)
+    {
+        currentMjpegIndex = 0;
+    }
+}
 
-void loop() {
-    // Check for boot button press (with debounce)
-    if (digitalRead(BOOT_PIN) == LOW) {
-        unsigned long currentTime = millis();
-        if (currentTime - lastButtonPress > DEBOUNCE_DELAY) {
-            isInverted = !isInverted;  // Toggle inversion state
-            tft.invertDisplay(isInverted);
-            lastButtonPress = currentTime;
-            Serial.printf("Display inversion %s\n", isInverted ? "ON" : "OFF");
+// Play the current mjpeg
+void playSelectedMjpeg(int mjpegIndex)
+{
+    // Build the full path for the selected mjpeg
+    String fullPath = String(MJPEG_FOLDER) + "/" + mjpegFileList[mjpegIndex];
+    char mjpegFilename[128];
+    fullPath.toCharArray(mjpegFilename, sizeof(mjpegFilename));
+
+    Serial.printf("Playing %s\n", mjpegFilename);
+    mjpegPlayFromSDCard(mjpegFilename);
+}
+
+// Callback function to draw a JPEG
+int jpegDrawCallback(JPEGDRAW *pDraw)
+{
+    unsigned long s = millis();
+    gfx->draw16bitBeRGBBitmap(pDraw->x, pDraw->y, pDraw->pPixels, pDraw->iWidth, pDraw->iHeight);
+    total_show_video += millis() - s;
+    return 1;
+}
+
+// Play a mjpeg stored on the SD card
+void mjpegPlayFromSDCard(char *mjpegFilename)
+{
+    Serial.printf("Opening %s\n", mjpegFilename);
+    File mjpegFile = SD.open(mjpegFilename, "r");
+
+    if (!mjpegFile || mjpegFile.isDirectory())
+    {
+        Serial.printf("ERROR: Failed to open %s file for reading\n", mjpegFilename);
+    }
+    else
+    {
+        Serial.println("MJPEG start");
+        gfx->fillScreen(RGB565_BLACK);
+
+        start_ms = millis();
+        curr_ms = millis();
+        total_frames = 0;
+        total_read_video = 0;
+        total_decode_video = 0;
+        total_show_video = 0;
+
+        mjpeg.setup(
+            &mjpegFile, mjpeg_buf, jpegDrawCallback, true /* useBigEndian */);
+
+        while (!skipRequested && mjpegFile.available() && mjpeg.readMjpegBuf())
+        {
+            // Read video
+            total_read_video += millis() - curr_ms;
+            curr_ms = millis();
+
+            // Play video
+            mjpeg.drawJpg();
+            total_decode_video += millis() - curr_ms;
+
+            curr_ms = millis();
+            total_frames++;
+        }
+        /* We exited because the button was pressed or the video ended */
+        if (skipRequested) // pressed?
+        {
+            uint32_t now = millis(); // safe here
+            if (now - lastPress < BOOT_BUTTON_DEBOUCE_TIME)
+            {
+                // ignore if it was within the debounce time
+            }
+            else
+            {
+                lastPress = now;
+            }
+        }
+        skipRequested = false;
+
+        int time_used = millis() - start_ms;
+        Serial.println(F("MJPEG end"));
+        mjpegFile.close();
+        skipRequested = false; // ready for next video
+        float fps = 1000.0 * total_frames / time_used;
+        total_decode_video -= total_show_video;
+        Serial.printf("Total frames: %d\n", total_frames);
+        Serial.printf("Time used: %d ms\n", time_used);
+        Serial.printf("Average FPS: %0.1f\n", fps);
+        Serial.printf("Read MJPEG: %lu ms (%0.1f %%)\n", total_read_video, 100.0 * total_read_video / time_used);
+        Serial.printf("Decode video: %lu ms (%0.1f %%)\n", total_decode_video, 100.0 * total_decode_video / time_used);
+        Serial.printf("Show video: %lu ms (%0.1f %%)\n", total_show_video, 100.0 * total_show_video / time_used);
+        // Video size metrics not available in current MjpegClass implementation
+    }
+}
+
+// Read the mjpeg file list in the mjpeg folder of the SD card
+void loadMjpegFilesList()
+{
+    File mjpegDir = SD.open(MJPEG_FOLDER);
+    if (!mjpegDir)
+    {
+        Serial.printf("Failed to open %s folder\n", MJPEG_FOLDER);
+        while (true)
+        {
+            /* code */
         }
     }
-    
-    delay(100); // Small delay to prevent watchdog resets
+    mjpegCount = 0;
+    while (true)
+    {
+        File file = mjpegDir.openNextFile();
+        if (!file)
+            break;
+        if (!file.isDirectory())
+        {
+            String name = file.name();
+            if (name.endsWith(".mjpeg"))
+            {
+                mjpegFileList[mjpegCount] = name;
+                mjpegFileSizes[mjpegCount] = file.size(); // Save file size (in bytes)
+                mjpegCount++;
+                if (mjpegCount >= MAX_FILES)
+                    break;
+            }
+        }
+        file.close();
+    }
+    mjpegDir.close();
+    Serial.printf("%d mjpeg files read\n", mjpegCount);
+    // Optionally, print out each file's size for debugging:
+    for (int i = 0; i < mjpegCount; i++)
+    {
+        Serial.printf("File %d: %s, Size: %lu bytes (%s)\n", i, mjpegFileList[i].c_str(), mjpegFileSizes[i], formatBytes(mjpegFileSizes[i]).c_str());
+    }
+}
+
+// Function helper display sizes on the serial monitor
+String formatBytes(size_t bytes)
+{
+    if (bytes < 1024)
+    {
+        return String(bytes) + " B";
+    }
+    else if (bytes < (1024 * 1024))
+    {
+        return String(bytes / 1024.0, 2) + " KB";
+    }
+    else
+    {
+        return String(bytes / 1024.0 / 1024.0, 2) + " MB";
+    }
 }
