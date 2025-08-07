@@ -43,7 +43,19 @@ static int jpegDrawTime = 0;
 static int tft_output(JPEGDRAW *pDraw) {
     // Calculate time taken to draw frame
     unsigned long start = millis();
-    tft.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, (uint16_t *)pDraw->pPixels);
+
+    uint16_t *pixels = (uint16_t *)pDraw->pPixels;
+    int count = pDraw->iWidth * pDraw->iHeight;
+
+#if (TFT_RGB_ORDER == TFT_BGR)
+    // Display expects BGR data, swap red and blue channels
+    for (int i = 0; i < count; i++) {
+        uint16_t c = pixels[i];
+        pixels[i] = (c & 0x07E0) | ((c & 0x001F) << 11) | ((c & 0xF800) >> 11);
+    }
+#endif
+
+    tft.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pixels);
     jpegDrawTime += millis() - start;
     return 1; // Return 1 to indicate success
 }
@@ -78,7 +90,7 @@ void playVideo(const char *path) {
     jpegDrawTime = 0;
 
     // Setup MJPEG decoder
-    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Set to false for BGR color format
+    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Use little-endian pixel order
 
     // Play video
     while (vFile.available()) {
