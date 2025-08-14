@@ -77,7 +77,7 @@ void playVideo(const char *path) {
     jpegDrawTime = 0;
 
     // Setup MJPEG decoder
-    mjpeg.setup(&vFile, mjpeg_buf, tft_output, true);  // Use RGB565 big-endian format
+    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Output little-endian RGB565 pixels
 
     // Play video
     while (vFile.available()) {
@@ -141,7 +141,8 @@ void setup() {
     Serial.println("Display initialization");
     tft.init();
     tft.setRotation(0); // Portrait
-    tft.setSwapBytes(false); // MJPEG decoder outputs big-endian data
+    tft.setSwapBytes(true); // Swap byte order for little-endian pixel data
+    tft.invertDisplay(false); // Ensure display color inversion is disabled
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(1);
