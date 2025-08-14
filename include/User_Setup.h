@@ -1,4 +1,2 @@
-
-
-#define TFT_RGB_ORDER TFT_BGR 
-
+#define TFT_RGB_ORDER TFT_BGR
+#define TFT_INVERSION_ON

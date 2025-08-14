@@ -3,12 +3,12 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
+#include <esp_system.h>
 #include "MjpegClass.h"
 
 // Pin definitions
 #define BL_PIN 21  // Backlight pin
 #define TFT_BL 21  // Backlight control
-#define BOOT_PIN 0 // Boot button for control
 
 // SPI configuration
 static const int spi_speed = 80000000;
@@ -57,13 +57,13 @@ static void drawProgressBar(int x, int y, int width, int height, uint8_t progres
     }
 }
 
-void playVideo(const char *path) {
+bool playVideo(const char *path) {
     Serial.printf("Playing video from: %s\n", path);
 
     File vFile = SD.open(path);
     if (!vFile || vFile.isDirectory()) {
         Serial.println("ERROR: Failed to open video file");
-        return;
+        return false;
     }
 
     Serial.println("MJPEG video start");
@@ -77,8 +77,14 @@ void playVideo(const char *path) {
     total_frames = 0;
     jpegDrawTime = 0;
 
-    // Setup MJPEG decoder
-    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Set to false for BGR color format
+    // Setup MJPEG decoder to output little-endian RGB565 pixels
+    if (!mjpeg.setup(&vFile, mjpeg_buf, tft_output, false)) {
+        Serial.println("Failed to setup MJPEG decoder");
+        vFile.close();
+        return false;
+    }
+
+    bool success = true;
 
     // Play video
     while (vFile.available()) {
@@ -86,14 +92,16 @@ void playVideo(const char *path) {
         curr_ms = millis();
         if (!mjpeg.readMjpegBuf()) {
             Serial.println("Read video error");
+            success = false;
             break;
         }
         total_play_video += millis() - curr_ms;
 
-        // Play video        
+        // Play video
         curr_ms = millis();
         if (!mjpeg.drawJpg()) {
             Serial.println("Draw video error");
+            success = false;
             break;
         }
         total_decode_video += millis() - curr_ms;
@@ -129,6 +137,8 @@ void playVideo(const char *path) {
     tft.printf("Avg FPS: %0.1f\n", fps);
     tft.setTextColor(TFT_WHITE);
     tft.printf("Time: %0.1fs\n", total_time / 1000.0);
+
+    return success;
 }
 
 void setup() {
@@ -142,37 +152,12 @@ void setup() {
     Serial.println("Display initialization");
     tft.init();
     tft.setRotation(0); // Portrait
-    tft.fillScreen(TFT_BLACK);
-    // Display inversion can be toggled with BOOT button if needed for your specific model
-    Serial.printf("Screen size Width=%d, Height=%d\n", tft.width(), tft.height());
-
-    // Initialize SD card using custom SPI configuration
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-
-    if (!SD.begin(SD_CS, SPI)) {
-        Serial.println("ERROR: File system mount failed!");
-        tft.setTextColor(TFT_RED);
-        tft.drawString("SD Card Mount Failed", 10, 10, 2);
-        while (1) delay(100);
-    }
-
-    // Allocate video buffers
-    Serial.println("Allocating video buffers...");
-    mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
-    if (!mjpeg_buf) {
-        Serial.println("mjpeg_buf allocation failed!");
-        while (1) delay(100);
-    }
-
-    // Initialize display
-    tft.init();
-    tft.setRotation(0);  // Portrait
+    tft.setSwapBytes(true);  // Swap bytes so little-endian colors are sent correctly
+    tft.invertDisplay(true); // Enable display color inversion as required by panel
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(1);
-    delay(500);
-
-    Serial.println("Display initialized");
+    Serial.printf("Screen size Width=%d, Height=%d\n", tft.width(), tft.height());
     tft.drawString("Initializing SD card...", 10, 10, 2);
 
     // Initialize SD card using VSPI (same as display)
@@ -193,9 +178,8 @@ void setup() {
     digitalWrite(SD_CS, HIGH);
     delay(100);
 
-    // Initialize using default VSPI
-    SPIClass sdSPI = SPI;
-    sdSPI.begin();
+    // Initialize using default VSPI without creating a temporary SPI instance
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
     Serial.println("Attempting SD card initialization...");
     bool sdInitialized = false;
@@ -204,7 +188,7 @@ void setup() {
     for (int attempt = 0; attempt < 3; attempt++) {
         Serial.printf("SD init attempt %d\n", attempt + 1);
 
-        if (SD.begin(SD_CS, sdSPI)) {
+        if (SD.begin(SD_CS)) {
             sdInitialized = true;
             Serial.println("SD.begin() successful");
 
@@ -260,33 +244,28 @@ void setup() {
         Serial.println("SD card init failed after all attempts");
         tft.setTextColor(TFT_RED, TFT_BLACK);
         tft.drawString("SD card init failed!", 10, 30, 2);
-        return;
+        delay(1000);
+        ESP.restart();
     }
 
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString("SD card initialized!", 10, 30, 2);
     delay(1000);
 
-    // Start video playback
-    playVideo(VIDEO_PATH);
+    // Allocate video buffers now that the SD card is ready
+    Serial.println("Allocating video buffers...");
+    mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
+    if (!mjpeg_buf) {
+        Serial.println("mjpeg_buf allocation failed!");
+        delay(1000);
+        ESP.restart();
+    }
 }
 
-// Global variable to track inversion state
-static bool isInverted = false;
-static unsigned long lastButtonPress = 0;
-const unsigned long DEBOUNCE_DELAY = 300;  // Debounce time in milliseconds
-
 void loop() {
-    // Check for boot button press (with debounce)
-    if (digitalRead(BOOT_PIN) == LOW) {
-        unsigned long currentTime = millis();
-        if (currentTime - lastButtonPress > DEBOUNCE_DELAY) {
-            isInverted = !isInverted;  // Toggle inversion state
-            tft.invertDisplay(isInverted);
-            lastButtonPress = currentTime;
-            Serial.printf("Display inversion %s\n", isInverted ? "ON" : "OFF");
-        }
+    if (!playVideo(VIDEO_PATH)) {
+        Serial.println("Video playback failed, restarting...");
+        delay(1000);
+        ESP.restart();
     }
-    
-    delay(100); // Small delay to prevent watchdog resets
 }
