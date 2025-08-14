@@ -77,8 +77,8 @@ bool playVideo(const char *path) {
     total_frames = 0;
     jpegDrawTime = 0;
 
-    // Setup MJPEG decoder
-    if (!mjpeg.setup(&vFile, mjpeg_buf, tft_output, false)) {  // Output little-endian RGB565 pixels
+    // Setup MJPEG decoder to output big-endian RGB565 pixels
+    if (!mjpeg.setup(&vFile, mjpeg_buf, tft_output, true)) {
         Serial.println("Failed to setup MJPEG decoder");
         vFile.close();
         return false;
@@ -152,7 +152,7 @@ void setup() {
     Serial.println("Display initialization");
     tft.init();
     tft.setRotation(0); // Portrait
-    tft.setSwapBytes(true); // Swap byte order for little-endian pixel data
+    tft.setSwapBytes(false); // MJPEG decoder already provides big-endian pixels
     tft.invertDisplay(false); // Ensure display color inversion is disabled
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -178,9 +178,8 @@ void setup() {
     digitalWrite(SD_CS, HIGH);
     delay(100);
 
-    // Initialize using default VSPI
-    SPIClass sdSPI = SPI;
-    sdSPI.begin();
+    // Initialize using default VSPI without creating a temporary SPI instance
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
 
     Serial.println("Attempting SD card initialization...");
     bool sdInitialized = false;
@@ -189,7 +188,7 @@ void setup() {
     for (int attempt = 0; attempt < 3; attempt++) {
         Serial.printf("SD init attempt %d\n", attempt + 1);
 
-        if (SD.begin(SD_CS, sdSPI)) {
+        if (SD.begin(SD_CS)) {
             sdInitialized = true;
             Serial.println("SD.begin() successful");
 
