@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
+#include <esp_system.h>
 #include "MjpegClass.h"
 
 // Pin definitions
@@ -56,13 +57,13 @@ static void drawProgressBar(int x, int y, int width, int height, uint8_t progres
     }
 }
 
-void playVideo(const char *path) {
+bool playVideo(const char *path) {
     Serial.printf("Playing video from: %s\n", path);
 
     File vFile = SD.open(path);
     if (!vFile || vFile.isDirectory()) {
         Serial.println("ERROR: Failed to open video file");
-        return;
+        return false;
     }
 
     Serial.println("MJPEG video start");
@@ -77,7 +78,13 @@ void playVideo(const char *path) {
     jpegDrawTime = 0;
 
     // Setup MJPEG decoder
-    mjpeg.setup(&vFile, mjpeg_buf, tft_output, false);  // Output little-endian RGB565 pixels
+    if (!mjpeg.setup(&vFile, mjpeg_buf, tft_output, false)) {  // Output little-endian RGB565 pixels
+        Serial.println("Failed to setup MJPEG decoder");
+        vFile.close();
+        return false;
+    }
+
+    bool success = true;
 
     // Play video
     while (vFile.available()) {
@@ -85,14 +92,16 @@ void playVideo(const char *path) {
         curr_ms = millis();
         if (!mjpeg.readMjpegBuf()) {
             Serial.println("Read video error");
+            success = false;
             break;
         }
         total_play_video += millis() - curr_ms;
 
-        // Play video        
+        // Play video
         curr_ms = millis();
         if (!mjpeg.drawJpg()) {
             Serial.println("Draw video error");
+            success = false;
             break;
         }
         total_decode_video += millis() - curr_ms;
@@ -128,6 +137,8 @@ void playVideo(const char *path) {
     tft.printf("Avg FPS: %0.1f\n", fps);
     tft.setTextColor(TFT_WHITE);
     tft.printf("Time: %0.1fs\n", total_time / 1000.0);
+
+    return success;
 }
 
 void setup() {
@@ -234,7 +245,8 @@ void setup() {
         Serial.println("SD card init failed after all attempts");
         tft.setTextColor(TFT_RED, TFT_BLACK);
         tft.drawString("SD card init failed!", 10, 30, 2);
-        return;
+        delay(1000);
+        ESP.restart();
     }
 
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -246,14 +258,15 @@ void setup() {
     mjpeg_buf = (uint8_t *)malloc(MJPEG_BUFFER_SIZE);
     if (!mjpeg_buf) {
         Serial.println("mjpeg_buf allocation failed!");
-        while (1) delay(100);
+        delay(1000);
+        ESP.restart();
     }
-
-    // Start video playback
-    playVideo(VIDEO_PATH);
 }
 
 void loop() {
-    // Nothing to do here yet
-    delay(100); // Small delay to prevent watchdog resets
+    if (!playVideo(VIDEO_PATH)) {
+        Serial.println("Video playback failed, restarting...");
+        delay(1000);
+        ESP.restart();
+    }
 }
